@@ -1,80 +1,124 @@
 import os
-import pickle
+import google_auth_oauthlib.flow
+import googleapiclient.discovery
+import googleapiclient.errors
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
+# 1. SETUP
+scopes = ["https://www.googleapis.com/auth/youtube.force-ssl"]
+api_service_name = "youtube"
+api_version = "v3"
+client_secrets_file = "client_secret.json"
 
-# Permissions
-SCOPES = [
-    "https://www.googleapis.com/auth/youtube.force-ssl"
-]
-
-TOKEN_FILE = "token.pickle"
-CLIENT_SECRET_FILE = "client_secret.json"
-
-
-def authenticate():
+def get_authenticated_service():
     creds = None
+    # The file token.json stores the user's access and refresh tokens
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', scopes)
+    
+    # If there are no (valid) credentials available, let the user log in.
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file(
+                client_secrets_file, scopes)
+            # Use a fixed port if you want to whitelist it in Google Cloud
+            creds = flow.run_local_server(port=0)
+        
+        # Save the credentials for the next run
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
 
-    if os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE, "rb") as token:
-            creds = pickle.load(token)
+    return googleapiclient.discovery.build(api_service_name, api_version, credentials=creds)
 
-    if not creds:
-        flow = InstalledAppFlow.from_client_secrets_file(
-            CLIENT_SECRET_FILE, SCOPES
-        )
-        creds = flow.run_local_server(port=0)
+# ... (The rest of the get_comments and reply_to_comment functions remain the same)
 
+# 1. SETUP SCOPES AND API INFO
+scopes = ["https://www.googleapis.com/auth/youtube.force-ssl"]
+api_service_name = "youtube"
+api_version = "v3"
+client_secrets_file = "client_secret.json"
 
-
-        with open(TOKEN_FILE, "wb") as token:
-            pickle.dump(creds, token)
-
-    return build("youtube", "v3", credentials=creds)
 
 
 def get_comments(youtube, video_id):
-    request = youtube.commentThreads().list(
-        part="snippet",
-        videoId=video_id,
-        maxResults=10,
-        textFormat="plainText"
-    )
-    response = request.execute()
+    """
+    Lists the top-level comments for a specific video.
+    """
+    try:
+        request = youtube.commentThreads().list(
+            part="snippet,replies",
+            videoId=video_id,
+            maxResults=20,  # Max is 100
+            textFormat="plainText"
+        )
+        response = request.execute()
 
-    comments = []
+        comments_data = []
+        for item in response.get("items", []):
+            top_comment = item["snippet"]["topLevelComment"]
+            comment_id = top_comment["id"]
+            author = top_comment["snippet"]["authorDisplayName"]
+            text = top_comment["snippet"]["textDisplay"]
+            
+            comments_data.append({
+                "id": comment_id,
+                "author": author,
+                "text": text
+            })
+            
+        return comments_data
 
-    for item in response["items"]:
-        comment = item["snippet"]["topLevelComment"]["snippet"]["textDisplay"]
-        comment_id = item["snippet"]["topLevelComment"]["id"]
-        comments.append((comment_id, comment))
+    except googleapiclient.errors.HttpError as e:
+        print(f"Error fetching comments: {e}")
+        return []
 
-    return comments
-
-
-def reply_to_comment(youtube, comment_id, text):
-    youtube.comments().insert(
-        part="snippet",
-        body={
-            "snippet": {
-                "parentId": comment_id,
-                "textOriginal": text
+def reply_to_comment(youtube, parent_id, reply_text):
+    """
+    Replies to a specific comment using its ID (parent_id).
+    """
+    try:
+        request = youtube.comments().insert(
+            part="snippet",
+            body={
+                "snippet": {
+                    "parentId": parent_id,
+                    "textOriginal": reply_text
+                }
             }
-        }
-    ).execute()
+        )
+        response = request.execute()
+        print(f"Successfully replied to {parent_id}!")
+        return response
 
+    except googleapiclient.errors.HttpError as e:
+        print(f"Error posting reply: {e}")
+        return None
 
+# --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    VIDEO_ID = "9iTUv_jj-Zk"
+    # 1. Authenticate (Browser will open to login)
+    youtube_service = get_authenticated_service()
 
-    youtube = authenticate()
-    comments = get_comments(youtube, VIDEO_ID)
+    # 2. Define the video you want to check
+    VIDEO_ID = "9iTUv_jj-Zk"  # Replace with a real Video ID
 
-    print("Found comments:")
-    for cid, text in comments:
-        print("-", text)
+    # 3. Get Comments
+    print(f"Fetching comments for video: {VIDEO_ID}...")
+    comments = get_comments(youtube_service, VIDEO_ID)
 
-        reply = f"Thanks for your comment: '{text}'"
-        reply_to_comment(youtube, cid, reply)
-        print("Replied.")
+    for i, comment in enumerate(comments):
+        print(f"[{i}] {comment['author']}: {comment['text']}")
+
+    # 4. Interactive Reply (Optional)
+    if comments:
+        choice = input("\nEnter the index number of the comment to reply to (or 'q' to quit): ")
+        if choice.isdigit() and int(choice) < len(comments):
+            target_comment = comments[int(choice)]
+            reply_msg = input(f"Enter your reply to {target_comment['author']}: ")
+            
+            reply_to_comment(youtube_service, target_comment['id'], reply_msg)
+        else:
+            print("Exiting without replying.")
